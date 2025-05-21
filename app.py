@@ -1829,6 +1829,8 @@ class ImageReviewApp:
         self.comment_text = self.persistent_comment_text
 
         # Add keyboard shortcuts for predefined comments
+        self.persistent_comment_text.bind("<Control-a>", lambda e: self.add_predefined_comment("Immaculate and precise"))
+        self.persistent_comment_text.bind("<Control-q>", lambda e: self.add_predefined_comment("1-1.5 pixel(s) off"))
         self.persistent_comment_text.bind("<Control-f>", lambda e: self.add_predefined_comment("Full revision"))
         self.persistent_comment_text.bind("<Control-n>", lambda e: self.add_predefined_comment("Minor edits"))
         self.persistent_comment_text.bind("<Control-m>", lambda e: self.add_predefined_comment("Major edits"))
@@ -1857,6 +1859,12 @@ class ImageReviewApp:
         shortcuts_frame.pack(side=tk.LEFT, padx=10, pady=(0, 5))
         
         # Add shortcut buttons
+        ttk.Button(shortcuts_frame, text="100% Accurate (Ctrl+A)", 
+                command=lambda: self.add_predefined_comment("Immaculate and precise"), 
+                width=20).pack(side=tk.LEFT, padx=2)
+        ttk.Button(shortcuts_frame, text="Pixel(s) off (Ctrl+Q)", 
+                command=lambda: self.add_predefined_comment("1-1.5 pixels off"), 
+                width=20).pack(side=tk.LEFT, padx=2)
         ttk.Button(shortcuts_frame, text="Full (Ctrl+F)", 
                 command=lambda: self.add_predefined_comment("Full revision"), 
                 width=12).pack(side=tk.LEFT, padx=2)
@@ -2196,8 +2204,14 @@ class ImageReviewApp:
             # Let the Text widget handle the key normally
             return
 
-        # These shortcuts will work even when not focused on the text area
-        if event.keysym == "f" and event.state & 0x4:  # Ctrl+F
+        # These shortcuts will work even when not focused on the text area 
+        if event.keysym == "a" and event.state & 0x4:  # Ctrl+F
+            self.add_predefined_comment("Immaculate and precise")
+            return "break"
+        elif event.keysym == "q" and event.state & 0x4:  # Ctrl+F
+            self.add_predefined_comment("1-1.5 Pixel(s) off")
+            return "break"
+        elif event.keysym == "f" and event.state & 0x4:  # Ctrl+F
             self.add_predefined_comment("Full revision")
             return "break"
         elif event.keysym == "n" and event.state & 0x4:  # Ctrl+N
