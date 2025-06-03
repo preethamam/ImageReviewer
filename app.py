@@ -1,12 +1,16 @@
 import colorsys
+import gc
 import glob
 import hashlib
 import json
 import os
+import pickle
 import tempfile
 import time
+import threading
 import tkinter as tk
 import xml.etree.ElementTree as ET
+from functools import lru_cache
 from tkinter import filedialog, messagebox, ttk
 
 import cv2
@@ -23,13 +27,253 @@ from tqdm import tqdm
 # Helper Functions
 #########################
 
+class BinaryAnnotationManager:
+    """
+    Manages binary annotations with lazy loading to reduce memory usage.
+    Only loads contours for the current image being viewed.
+    """
+    def __init__(self, annotation_dir, image_dir, resize_enabled=False, resize_factor=1.0):
+        self.annotation_dir = annotation_dir
+        self.image_dir = image_dir
+        self.resize_enabled = resize_enabled
+        self.resize_factor = resize_factor
+        self._preload_thread = None
+        self.cache_dir = os.path.join(os.path.expanduser("~"), ".image_review_tool_cache")
+        os.makedirs(self.cache_dir, exist_ok=True)
+        
+        # Store only metadata in memory
+        self.metadata_by_filename = {}  # filename -> list of bbox metadata
+        self.mask_file_mapping = {}  # image filename -> mask file path
+        self.current_annotations_cache = {}  # Cache for current image only
+        self.categories = {1: "cracks"}
+        
+        self._build_metadata()
+        
+        # Add LRU cache for recent images (keep 5 in memory)
+        self.get_annotations_for_image = lru_cache(maxsize=5)(self._get_annotations_for_image_uncached)
+    
+    def preload_adjacent_images(self, current_filename, all_filenames):
+        """Preload next and previous images in background"""
+        if self._preload_thread and self._preload_thread.is_alive():
+            return
+        
+        def _preload():
+            try:
+                current_idx = all_filenames.index(current_filename)
+                # Preload next
+                if current_idx + 1 < len(all_filenames):
+                    self.get_annotations_for_image(all_filenames[current_idx + 1])
+                # Preload previous
+                if current_idx - 1 >= 0:
+                    self.get_annotations_for_image(all_filenames[current_idx - 1])
+            except:
+                pass
+        
+        self._preload_thread = threading.Thread(target=_preload, daemon=True)
+        self._preload_thread.start()
+        
+    def _build_metadata(self):
+        """Build metadata index without loading full contours"""
+        # Generate cache file name
+        dataset_hash = self._generate_dataset_hash()
+        metadata_cache_file = os.path.join(self.cache_dir, f"binary_metadata_{dataset_hash}.pkl")
+        
+        # Try to load from cache
+        if os.path.exists(metadata_cache_file):
+            try:
+                print(f"Loading cached metadata from {metadata_cache_file}")
+                with open(metadata_cache_file, 'rb') as f:
+                    cache_data = pickle.load(f)
+                    self.metadata_by_filename = cache_data['metadata']
+                    self.mask_file_mapping = cache_data['mapping']
+                print(f"Loaded metadata for {len(self.metadata_by_filename)} images")
+                return
+            except Exception as e:
+                print(f"Error loading metadata cache: {e}, will regenerate")
+        
+        # Build metadata
+        print("Building metadata index for binary annotations...")
+        start_time = time.time()
+        
+        # Get all mask files
+        mask_files = glob.glob(os.path.join(self.annotation_dir, '*'))
+        
+        # Process each mask file to extract metadata only
+        results = Parallel(n_jobs=-1, prefer="threads")(
+            delayed(self._extract_metadata)(mask_file) 
+            for mask_file in tqdm(mask_files, desc="Extracting metadata")
+        )
+        
+        # Combine results
+        for result in results:
+            if result:
+                image_name, metadata_list, mask_path = result
+                self.metadata_by_filename[image_name] = metadata_list
+                self.mask_file_mapping[image_name] = mask_path
+        
+        # Save metadata cache
+        try:
+            with open(metadata_cache_file, 'wb') as f:
+                pickle.dump({
+                    'metadata': self.metadata_by_filename,
+                    'mapping': self.mask_file_mapping
+                }, f)
+            print(f"Metadata cache saved. Processing time: {time.time() - start_time:.2f} seconds")
+        except Exception as e:
+            print(f"Error saving metadata cache: {e}")
+    
+    def _extract_metadata(self, mask_file):
+        """Extract only bounding box metadata from a mask file"""
+        mask_basename = os.path.basename(mask_file)
+        mask_name_without_ext = os.path.splitext(mask_basename)[0]
+        
+        # Find corresponding image
+        try:
+            all_image_files = os.listdir(self.image_dir)
+            original_image_name = None
+            for img_file in all_image_files:
+                img_name_without_ext = os.path.splitext(img_file)[0]
+                if img_name_without_ext.lower() == mask_name_without_ext.lower():
+                    original_image_name = img_file
+                    break
+            
+            if not original_image_name:
+                return None
+            
+            # Load mask to get bounding boxes only
+            mask = cv2.imread(mask_file, cv2.IMREAD_GRAYSCALE)
+            if mask is None:
+                return None
+            
+            # Apply resizing if needed
+            if self.resize_enabled and self.resize_factor < 1.0:
+                new_width = int(mask.shape[1] * self.resize_factor)
+                new_height = int(mask.shape[0] * self.resize_factor)
+                mask = cv2.resize(mask, (new_width, new_height), interpolation=cv2.INTER_NEAREST)
+            
+            # Get contours just to extract bounding boxes
+            _, mask = cv2.threshold(mask, 127, 255, cv2.THRESH_BINARY)
+            contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
+            
+            metadata_list = []
+            for idx, contour in enumerate(contours):
+                x, y, w, h = cv2.boundingRect(contour)
+                if w >= 2 and h >= 2:  # Skip tiny annotations
+                    metadata_list.append({
+                        'bbox': [x, y, w, h],
+                        'area': cv2.contourArea(contour),
+                        'contour_idx': idx  # Store index for later retrieval
+                    })
+            
+            return original_image_name, metadata_list, mask_file
+            
+        except Exception as e:
+            print(f"Error processing {mask_file}: {e}")
+            return None
+    
+    def _generate_dataset_hash(self):
+        """Generate unique hash for the dataset"""
+        ann_mtime = max([os.path.getmtime(os.path.join(self.annotation_dir, f)) 
+                        for f in os.listdir(self.annotation_dir) 
+                        if os.path.isfile(os.path.join(self.annotation_dir, f))], default=0)
+        hash_str = f"{os.path.abspath(self.annotation_dir)}_{os.path.abspath(self.image_dir)}_{ann_mtime}_{self.resize_factor}"
+        return hashlib.md5(hash_str.encode('utf-8')).hexdigest()
+    
+    def _get_annotations_for_image_uncached(self, image_filename):
+        """Get full annotations for a specific image (with contours)"""
+        # Check if already cached
+        if image_filename in self.current_annotations_cache:
+            return self.current_annotations_cache[image_filename]
+        
+        # Clear previous cache to free memory
+        self.current_annotations_cache.clear()
+        gc.collect()  # Force garbage collection
+        
+        # Get metadata
+        if image_filename not in self.metadata_by_filename:
+            return []
+        
+        # Load the mask file for this image
+        mask_path = self.mask_file_mapping.get(image_filename)
+        if not mask_path or not os.path.exists(mask_path):
+            return []
+        
+        try:
+            # Load mask - use IMREAD_UNCHANGED for faster loading
+            mask = cv2.imread(mask_path, cv2.IMREAD_GRAYSCALE)
+            if mask is None:
+                return []
+            
+            # Apply resizing if needed
+            if self.resize_enabled and self.resize_factor < 1.0:
+                new_width = int(mask.shape[1] * self.resize_factor)
+                new_height = int(mask.shape[0] * self.resize_factor)
+                mask = cv2.resize(mask, (new_width, new_height), interpolation=cv2.INTER_NEAREST)
+            
+            # Optimize: Skip threshold if already binary
+            if mask.max() > 1:
+                _, mask = cv2.threshold(mask, 127, 255, cv2.THRESH_BINARY)
+            
+            # Use CHAIN_APPROX_SIMPLE for faster processing (still accurate for display)
+            contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+            
+            # Build annotations with optimized conversion
+            annotations = []
+            metadata_list = self.metadata_by_filename[image_filename]
+            
+            for meta in metadata_list:
+                idx = meta['contour_idx']
+                if idx < len(contours):
+                    contour = contours[idx]
+                    
+                    # Faster conversion using numpy
+                    flattened = contour.flatten().astype(float).tolist()
+                    
+                    ann = {
+                        'category_id': 1,
+                        'bbox': meta['bbox'],
+                        'area': meta['area'],
+                        'segmentation': [flattened]
+                    }
+                    annotations.append(ann)
+            
+            return annotations
+            
+        except Exception as e:
+            print(f"Error loading annotations for {image_filename}: {e}")
+            return []
+    
+    def get_metadata_only(self, image_filename):
+        """Get only bounding box metadata (no contours) for a specific image"""
+        metadata_list = self.metadata_by_filename.get(image_filename, [])
+        # Convert to annotation format without segmentation
+        return [{
+            'category_id': 1,
+            'bbox': meta['bbox'],
+            'area': meta['area']
+        } for meta in metadata_list]
+    
+    def get_all_metadata(self):
+        """Get all metadata for all images (no contours)"""
+        all_metadata = {}
+        for filename, metadata_list in self.metadata_by_filename.items():
+            all_metadata[filename] = [{
+                'category_id': 1,
+                'bbox': meta['bbox'],
+                'area': meta['area']
+            } for meta in metadata_list]
+        return all_metadata
 
-def load_annotations(annotation_dir, annotation_type="COCO", image_dir="", yolo_labels_file="", resize_enabled=False, resize_factor=1.0):
+
+def load_annotations(annotation_dir, annotation_type="COCO", image_dir="", yolo_labels_file="", 
+                    resize_enabled=False, resize_factor=1.0):
+    """Modified load_annotations that uses lazy loading for binary annotations"""
     annotations_by_filename = {}
     categories = {}
     image_id_to_filename = {}
     agcontexts = {}
     info = {}
+    binary_manager = None
 
     def yolo_to_coco(yolo_bbox, img_width, img_height):
         class_id, center_x, center_y, width, height = map(float, yolo_bbox)
@@ -46,12 +290,12 @@ def load_annotations(annotation_dir, annotation_type="COCO", image_dir="", yolo_
                 yolo_categories[i] = line.strip()
 
     if annotation_type == "COCO":
+        # ... (keep existing COCO code)
         for json_file in glob.glob(os.path.join(annotation_dir, '*.json')):
             with open(json_file, 'r') as f:
                 data = json.load(f)
             if 'images' in data:
                 for image in data['images']:
-                    # Store full info for potential agcontext mapping
                     image_id_to_filename[image['id']] = {'file_name': os.path.basename(image['file_name']),
                                                         'agcontext_id': image.get('agcontext_id', 0)}
             if 'annotations' in data:
@@ -59,7 +303,7 @@ def load_annotations(annotation_dir, annotation_type="COCO", image_dir="", yolo_
                     img_id = ann.get('image_id')
                     img_info = image_id_to_filename.get(img_id)
                     if img_info:
-                        filename = img_info['file_name']  # Use basename only
+                        filename = img_info['file_name']
                         annotations_by_filename.setdefault(filename, []).append(ann)
             if 'categories' in data:
                 for cat in data['categories']:
@@ -73,6 +317,7 @@ def load_annotations(annotation_dir, annotation_type="COCO", image_dir="", yolo_
                 info = data['info']
 
     elif annotation_type == "VOC":
+        # ... (keep existing VOC code)
         for xml_file in glob.glob(os.path.join(annotation_dir, '*.xml')):
             tree = ET.parse(xml_file)
             root = tree.getroot()
@@ -94,17 +339,16 @@ def load_annotations(annotation_dir, annotation_type="COCO", image_dir="", yolo_
                 annotations_by_filename.setdefault(filename, []).append(ann)
 
     elif annotation_type == "YOLO":
+        # ... (keep existing YOLO code)
         for txt_file in glob.glob(os.path.join(annotation_dir, '*.txt')):
-            filename = os.path.splitext(os.path.basename(txt_file))[0] + '.jpg'  # Adjust extension if needed
+            filename = os.path.splitext(os.path.basename(txt_file))[0] + '.jpg'
             image_path = os.path.join(image_dir, filename)
             if os.path.exists(image_path):
                 img = cv2.imread(image_path)
                 if img is not None:
-                    # Get original dimensions
                     orig_height, orig_width = img.shape[:2]
                     img_height, img_width = orig_height, orig_width
                     
-                    # Apply resize if enabled
                     if resize_enabled and resize_factor < 1.0:
                         img_width = int(orig_width * resize_factor)
                         img_height = int(orig_height * resize_factor)
@@ -122,170 +366,17 @@ def load_annotations(annotation_dir, annotation_type="COCO", image_dir="", yolo_
                             categories[cid] = yolo_categories.get(cid, f"class_{cid}")
 
     elif annotation_type == "Binary":
-        # Set up "cracks" as the only category for binary masks
-        cat_id = 1  # Use 1 for the crack category ID
-        categories[cat_id] = "cracks"  # Define the category name
+        # Use the lazy loading manager
+        binary_manager = BinaryAnnotationManager(annotation_dir, image_dir, resize_enabled, resize_factor)
+        categories = binary_manager.categories
         
-        # Create a cache directory if it doesn't exist
-        cache_dir = os.path.join(os.path.expanduser("~"), ".image_review_tool_cache")
-        os.makedirs(cache_dir, exist_ok=True)
+        # Return only metadata for the initial load
+        # Full contours will be loaded on-demand when displaying each image
+        annotations_by_filename = binary_manager.get_all_metadata()
         
-        # Generate a unique hash for this dataset combination
-        def generate_dataset_hash(ann_dir, img_dir):
-            # Get modification times to detect changes
-            ann_mtime = max([os.path.getmtime(os.path.join(ann_dir, f)) 
-                            for f in os.listdir(ann_dir) if os.path.isfile(os.path.join(ann_dir, f))], default=0)
-            
-            # Create hash from directories and modification time
-            hash_str = f"{os.path.abspath(ann_dir)}_{os.path.abspath(img_dir)}_{ann_mtime}"
-            return hashlib.md5(hash_str.encode('utf-8')).hexdigest()
-        
-        # Generate hash for current dataset
-        dataset_hash = generate_dataset_hash(annotation_dir, image_dir)
-        cache_file = os.path.join(cache_dir, f"binary_annotations_{dataset_hash}.json")
-        
-        # Check if we have cached data for this dataset
-        if os.path.exists(cache_file):
-            try:
-                print(f"Loading cached binary annotations from {cache_file}")
-                with open(cache_file, 'r') as f:
-                    cached_data = json.load(f)
-                    
-                # Restore data from cache
-                annotations_by_filename = cached_data.get('annotations_by_filename', {})
-                categories = cached_data.get('categories', {})
-                
-                # Convert category IDs back to integers (JSON stores them as strings)
-                categories = {int(k): v for k, v in categories.items()}
-                
-                # Return early with cached data
-                return annotations_by_filename, categories, agcontexts, info
-                
-            except Exception as e:
-                print(f"Error loading cache: {e}, will regenerate")
-        
-        # Define function to process a single mask file
-        def process_mask_file(mask_file, image_dir, cat_id, resize_enabled=False, resize_factor=1.0):
-            mask_basename = os.path.basename(mask_file)
-            mask_name_without_ext = os.path.splitext(mask_basename)[0]
-            
-            # Find the corresponding original image in the images directory
-            original_image_found = False
-            original_image_name = None
-            
-            # Get all files in the image directory and check them
-            try:
-                all_image_files = os.listdir(image_dir)
-                
-                # Check each file to find a matching name (case-insensitive)
-                for img_file in all_image_files:
-                    img_name_without_ext = os.path.splitext(img_file)[0]
-                    
-                    # Compare names ignoring case
-                    if img_name_without_ext.lower() == mask_name_without_ext.lower():
-                        original_image_found = True
-                        original_image_name = img_file  # Use the actual filename with correct case
-                        break
-            except Exception:
-                return []  # Problem with image directory
-            
-            if not original_image_found:
-                return []  # No matching image found
-            
-            # Load the binary mask - already binary, no thresholding needed
-            mask = cv2.imread(mask_file, cv2.IMREAD_GRAYSCALE)
-            if mask is None:
-                return []  # Failed to load mask
-            
-            # Apply resizing to mask if enabled
-            if resize_enabled and resize_factor < 1.0:
-                new_width = int(mask.shape[1] * resize_factor)
-                new_height = int(mask.shape[0] * resize_factor)
-                mask = cv2.resize(mask, (new_width, new_height), interpolation=cv2.INTER_NEAREST)
-                
-            # Ensure mask is binary
-            _, mask = cv2.threshold(mask, 127, 255, cv2.THRESH_BINARY)
-            
-            # Find contours in the binary mask - use RETR_EXTERNAL to get only outer contours
-            # contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-            contours, _ = cv2.findContours(mask, cv2.RETR_CCOMP, cv2.CHAIN_APPROX_NONE)
-            
-            # Alternative contour finding method to try if the above doesn't work:
-            # Use edge detection followed by contour finding
-            # edges = cv2.Canny(mask, 100, 200)
-            # contours, _ = cv2.findContours(edges, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
-            
-            # Skip if no contours found
-            if not contours:
-                return []
-            
-            # Process each contour
-            annotations = []
-            for contour in contours:
-                # Get bounding box of contour
-                x, y, w, h = cv2.boundingRect(contour)
-                
-                # Ensure minimum size for bounding box to avoid degenerate cases
-                w = max(1, w)
-                h = max(1, h)
-                
-                # Convert contour to COCO-style segmentation format
-                flattened = []
-                for point in contour:
-                    x_coord, y_coord = point[0]
-                    flattened.append(float(x_coord))
-                    flattened.append(float(y_coord))
-                
-                # Only proceed if we have at least 3 points (minimal polygon)
-                if len(flattened) >= 6:
-                    # Create the annotation
-                    ann = {
-                        'category_id': cat_id,
-                        'bbox': [x, y, w, h],
-                        'segmentation': [flattened],
-                        'area': cv2.contourArea(contour)
-                    }
-                    annotations.append((original_image_name, ann))
-            
-            return annotations
-
-        # Process binary masks and build annotations
-        print("Processing binary mask annotations (this may take a minute)...")
-        start_time = time.time()
-        
-        # Get all mask files
-        mask_files = glob.glob(os.path.join(annotation_dir, '*'))
-        
-        # Process all mask files in parallel using joblib with tqdm progress bar
-        n_jobs = -1  # Use all available cores
-        results = Parallel(n_jobs=n_jobs, prefer="processes")(  # prefer="processes" | "threads"
-            delayed(process_mask_file)(mask_file, image_dir, cat_id, resize_enabled=resize_enabled, 
-                resize_factor=resize_factor) 
-            for mask_file in tqdm(mask_files, desc="Processing binary masks")
-        )
-        
-        # Combine results from all parallel processes
-        for result in results:
-            for original_image_name, ann in result:
-                annotations_by_filename.setdefault(original_image_name, []).append(ann)
-        
-        # Save the processed data to cache file
-        try:
-            cache_data = {
-                'annotations_by_filename': annotations_by_filename,
-                'categories': categories,
-                # Only include metadata that's relevant
-            }
-            
-            with open(cache_file, 'w') as f:
-                json.dump(cache_data, f)
-                
-            processing_time = time.time() - start_time
-            print(f"Binary annotations processed and cached in {processing_time:.2f} seconds")
-            
-        except Exception as e:
-            print(f"Error saving to cache: {e}")
-            
+        # Return the manager as part of the info dict
+        info['_binary_manager'] = binary_manager
+    
     return annotations_by_filename, categories, agcontexts, info
 
 def generate_category_colors(categories):
@@ -987,6 +1078,9 @@ class ImageReviewApp:
         style.configure("TCheckbutton", font=("Helvetica", 10))
         style.configure("Toggle.TButton", font=("Helvetica", 9))
 
+        # Add binary annotation manager reference
+        self.binary_annotation_manager = None
+        
         # Initialize variables
         self.annotation_dir = ""
         self.image_dir = ""
@@ -1702,24 +1796,28 @@ class ImageReviewApp:
                 pass
 
     def update_annotation_list(self):
-        """Update the annotation list for the current image"""
-        if self.filter_var is not None:  # Make sure filter_var is initialized
+        """Modified to handle lazy loading"""
+        if self.filter_var is not None:
             self.filter_annotations()
         else:
             self.annotation_listbox.delete(0, tk.END)
             current_file = self.image_files[self.current_index] if self.image_files else None
+            
+            # Get annotations (metadata only for binary, full for others)
             if current_file in self.annotations_by_filename:
-                for i, ann in enumerate(self.annotations_by_filename[current_file]):
+                annotations = self.annotations_by_filename[current_file]
+                for i, ann in enumerate(annotations):
                     cat_id = ann.get("category_id")
                     cat_label = self.categories.get(cat_id, str(cat_id))
                     self.annotation_listbox.insert(tk.END, f"{i + 1}: {cat_label}")
-                self.ann_count_var.set(f"({len(self.annotations_by_filename[current_file])})")
+                self.ann_count_var.set(f"({len(annotations)})")
             else:
                 self.annotation_listbox.insert(tk.END, "No annotations")
                 self.ann_count_var.set("(0)")
 
+
     def center_on_annotation(self, event):
-        """Center the view on the selected annotation"""
+        """Modified to handle lazy loading when centering on annotation"""
         selection = self.annotation_listbox.curselection()
         if not selection or self.base_cv_image is None:
             return
@@ -1728,7 +1826,12 @@ class ImageReviewApp:
         current_file = self.image_files[self.current_index]
 
         if current_file in self.annotations_by_filename:
-            annotations = self.annotations_by_filename[current_file]
+            # Get the annotation (may need to load full contours)
+            if self.binary_annotation_manager and self.side_panel.annotation_type.get() == "Binary":
+                annotations = self.binary_annotation_manager.get_annotations_for_image(current_file)
+            else:
+                annotations = self.annotations_by_filename[current_file]
+            
             if self.highlighted_annotation_index < len(annotations):
                 ann = annotations[self.highlighted_annotation_index]
 
@@ -1740,32 +1843,22 @@ class ImageReviewApp:
                         pts = np.array(ann["segmentation"][0], dtype=np.float32).reshape(-1, 2)
                         x, y, w, h = cv2.boundingRect(pts)
                     except:
-                        # Refresh and return if cannot get bounds
                         self.refresh_image()
                         return
                 else:
-                    # Refresh and return if no bounds
                     self.refresh_image()
                     return
 
                 # Center on the annotation
                 img_h, img_w = self.base_cv_image.shape[:2]
-
-                # Calculate center point of annotation in image coordinates
                 center_x = x + w / 2
                 center_y = y + h / 2
-
-                # Calculate where this should be on the canvas
                 canvas_center_x = self.canvas_width / 2
                 canvas_center_y = self.canvas_height / 2
-
-                # Adjust pan to center the annotation
                 self.pan_x = canvas_center_x - (center_x * self.zoom_factor)
                 self.pan_y = canvas_center_y - (center_y * self.zoom_factor)
-
-                # Refresh the display
                 self.refresh_image()
-
+                
     def on_annotation_select(self, event):
         """Handle selection of an annotation in the list"""
         selection = self.annotation_listbox.curselection()
@@ -2127,7 +2220,17 @@ class ImageReviewApp:
 
         # Draw annotations if enabled        
         if self.annotations_on.get() and current_file in self.annotations_by_filename:
-            ann_list = self.annotations_by_filename[current_file]
+            # Check if we need to load full contours for binary annotations
+            if self.binary_annotation_manager and self.side_panel.annotation_type.get() == "Binary":
+                # Load full annotations with contours for current image only
+                ann_list = self.binary_annotation_manager.get_annotations_for_image(current_file)
+                
+                # Preload adjacent images in background
+                self.binary_annotation_manager.preload_adjacent_images(current_file, self.image_files)
+            else:
+                # Use regular annotations
+                ann_list = self.annotations_by_filename[current_file]
+            
             img = draw_annotations(img, ann_list, self.categories, self.category_colors,
                                    highlighted_index=self.highlighted_annotation_index)
 
@@ -2420,8 +2523,15 @@ class ImageReviewApp:
             messagebox.showerror("Settings Save Error", f"Could not save settings: {e}")
 
     def on_closing(self):
+        """Modified to clean up binary annotation manager"""
         self.save_settings()
         self.save_comment()
+        
+        # Clean up binary annotation manager if exists
+        if self.binary_annotation_manager:
+            self.binary_annotation_manager.current_annotations_cache.clear()
+            gc.collect()
+        
         self.root.destroy()
 
     def browse_ann_dir(self):
@@ -2472,9 +2582,17 @@ class ImageReviewApp:
             messagebox.showerror("Error", "Output file must have a .xlsx extension.")
             return
         
+        # Modified load_annotations call
         self.annotations_by_filename, self.categories, self.agcontexts, self.info = load_annotations(
-            self.annotation_dir, annotation_type, self.image_dir, self.yolo_labels_file, resize_enabled=self.resize_enabled.get(),
-            resize_factor=self.resize_factor.get())
+                            self.annotation_dir, annotation_type, self.image_dir, self.yolo_labels_file, 
+                            resize_enabled=self.resize_enabled.get(), resize_factor=self.resize_factor.get())
+        
+        # Check if binary annotations and store the manager
+        if '_binary_manager' in self.info:
+            self.binary_annotation_manager = self.info.pop('_binary_manager')
+        else:
+            self.binary_annotation_manager = None
+            
         self.category_colors = generate_category_colors(self.categories)
         self.side_panel.filtered_tab.populate_class_list(self.categories)
         self.class_name_to_id = {cat_name: cat_id for cat_id, cat_name in self.categories.items()}
