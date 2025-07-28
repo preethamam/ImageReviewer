@@ -5,8 +5,10 @@ A Python-based desktop application for reviewing annotated images. It supports m
 ### App overview image:
 ![image](assets/overview.png)
 
+<!---
 ### Demonstration video:
 ![demo](assets/demo.gif)
+-->
 
 # Features
 
