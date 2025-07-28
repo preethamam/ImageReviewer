@@ -153,7 +153,7 @@ class BinaryAnnotationManager:
             
             # Get contours just to extract bounding boxes
             _, mask = cv2.threshold(mask, 127, 255, cv2.THRESH_BINARY)
-            contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
+            contours, _ = cv2.findContours(mask, cv2.RETR_CCOMP, cv2.CHAIN_APPROX_NONE)
             
             metadata_list = []
             for idx, contour in enumerate(contours):
@@ -215,7 +215,7 @@ class BinaryAnnotationManager:
                 _, mask = cv2.threshold(mask, 127, 255, cv2.THRESH_BINARY)
             
             # Use CHAIN_APPROX_SIMPLE for faster processing (still accurate for display)
-            contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+            contours, _ = cv2.findContours(mask, cv2.RETR_CCOMP, cv2.CHAIN_APPROX_SIMPLE)
             
             # Build annotations with optimized conversion
             annotations = []
@@ -794,7 +794,7 @@ class SidePanel:
             self.resize_factor_spinbox.pack(side=tk.LEFT, padx=5)
             # Make sure the frame is visible in the grid
             resize_factor_frame = self.resize_factor_label.master
-            resize_factor_frame.grid(row=8, column=0, columnspan=4, sticky=tk.W, padx=5, pady=0)
+            resize_factor_frame.grid(row=9, column=0, columnspan=4, sticky=tk.W, padx=5, pady=0)
         else:
             # Hide the label and spinbox
             self.resize_factor_label.pack_forget()
@@ -837,16 +837,24 @@ class SidePanel:
         browse_btn3 = ttk.Button(container, text="Browse", command=self.app.browse_output_file)
         browse_btn3.grid(row=2, column=3, padx=5, pady=8)
 
-        # Annotation type selection
-        ttk.Label(container, text="Annotation Type:", font=("Helvetica", 11)).grid(
+        # Comments directory row
+        ttk.Label(container, text="Comments\nDirectory:", font=("Helvetica", 11)).grid(
             row=3, column=0, sticky=tk.W, padx=5, pady=8)
+        self.comments_dir_entry = ttk.Entry(container, width=35, font=("Helvetica", 11))
+        self.comments_dir_entry.grid(row=3, column=1, columnspan=2, sticky=tk.EW, padx=5, pady=8)
+        browse_btn4 = ttk.Button(container, text="Browse", command=self.app.browse_comments_dir)
+        browse_btn4.grid(row=3, column=3, padx=5, pady=8)
+
+        # Annotation type selection
+        ttk.Label(container, text="Annotation\nType:", font=("Helvetica", 11)).grid(
+            row=4, column=0, sticky=tk.W, padx=5, pady=8)
         self.annotation_type = tk.StringVar(value="COCO")
         ttk.Radiobutton(container, text="COCO", variable=self.annotation_type, value="COCO",
-                        command=self.toggle_yolo_labels).grid(row=3, column=1, sticky=tk.W, padx=5)
-        ttk.Radiobutton(container, text="VOC", variable=self.annotation_type, value="VOC",
-                        command=self.toggle_yolo_labels).grid(row=3, column=2, sticky=tk.W, padx=5)
-        ttk.Radiobutton(container, text="YOLO", variable=self.annotation_type, value="YOLO",
                         command=self.toggle_yolo_labels).grid(row=4, column=1, sticky=tk.W, padx=5)
+        ttk.Radiobutton(container, text="VOC", variable=self.annotation_type, value="VOC",
+                        command=self.toggle_yolo_labels).grid(row=4, column=2, sticky=tk.W, padx=5)
+        ttk.Radiobutton(container, text="YOLO", variable=self.annotation_type, value="YOLO",
+                        command=self.toggle_yolo_labels).grid(row=5, column=1, sticky=tk.W, padx=5)
 
         # YOLO labels file row (hidden by default)
         self.yolo_labels_label = ttk.Label(container, text="YOLO Labels File:", font=("Helvetica", 11))
@@ -855,10 +863,10 @@ class SidePanel:
         self.toggle_yolo_labels()  # Initial state
 
         ttk.Radiobutton(container, text="Binary", variable=self.annotation_type, value="Binary",
-                        command=self.toggle_yolo_labels).grid(row=4, column=2, sticky=tk.W, padx=5)
+                        command=self.toggle_yolo_labels).grid(row=5, column=2, sticky=tk.W, padx=5)
         
         # Add resize image option
-        ttk.Separator(container, orient=tk.HORIZONTAL).grid(row=6, column=0, columnspan=4, sticky=tk.EW, pady=10)
+        ttk.Separator(container, orient=tk.HORIZONTAL).grid(row=7, column=0, columnspan=4, sticky=tk.EW, pady=10)
         
         # Resize checkbox
         # Resize checkbox (directly in container)
@@ -866,11 +874,11 @@ class SidePanel:
                                 variable=self.app.resize_enabled,
                                 onvalue=True, offvalue=False,
                                 command=self.toggle_resize_factor)
-        resize_cb.grid(row=7, column=0, columnspan=4, sticky=tk.W, padx=10, pady=5)
+        resize_cb.grid(row=8, column=0, columnspan=4, sticky=tk.W, padx=10, pady=5)
         
         # Resize factor entry and label in a new row (initially hidden)
         resize_factor_frame = ttk.Frame(container)
-        resize_factor_frame.grid(row=8, column=0, columnspan=4, sticky=tk.W, padx=5, pady=0)
+        resize_factor_frame.grid(row=9, column=0, columnspan=4, sticky=tk.W, padx=5, pady=0)
         
         self.resize_factor_label = ttk.Label(resize_factor_frame, text="Scale factor (0.1-1.0):", font=("Helvetica", 9))
         self.resize_factor_spinbox = ttk.Spinbox(resize_factor_frame, from_=0.1, to=1.0, increment=0.1, 
@@ -880,19 +888,19 @@ class SidePanel:
         self.toggle_resize_factor()
             
         # Add Continue where you left option below annotation type
-        ttk.Separator(container, orient=tk.HORIZONTAL).grid(row=9, column=0, columnspan=4, sticky=tk.EW, pady=10)
+        ttk.Separator(container, orient=tk.HORIZONTAL).grid(row=10, column=0, columnspan=4, sticky=tk.EW, pady=10)
         
         # Add the checkbox
         self.app.continue_last = tk.BooleanVar(value=True)  # Default to checked
         continue_cb = ttk.Checkbutton(container, text="Continue where you left", 
                                 variable=self.app.continue_last,
                                 onvalue=True, offvalue=False)
-        continue_cb.grid(row=10, column=0, columnspan=4, sticky=tk.W, padx=10, pady=5)
+        continue_cb.grid(row=11, column=0, columnspan=4, sticky=tk.W, padx=10, pady=5)
         
         # Buttons row
-        ttk.Separator(container, orient=tk.HORIZONTAL).grid(row=11, column=0, columnspan=4, sticky=tk.EW, pady=10)
+        ttk.Separator(container, orient=tk.HORIZONTAL).grid(row=12, column=0, columnspan=4, sticky=tk.EW, pady=10)
         btn_frame = ttk.Frame(container)
-        btn_frame.grid(row=12, column=0, columnspan=4, pady=15)
+        btn_frame.grid(row=13, column=0, columnspan=4, pady=15)
         btn_load = ttk.Button(btn_frame, text="Load Data", command=self.app.load_data, width=15)
         btn_load.pack(side=tk.LEFT, padx=5)
         btn_save = ttk.Button(btn_frame, text="Save Settings", command=self.app.save_settings, width=15)
@@ -900,9 +908,9 @@ class SidePanel:
 
     def toggle_yolo_labels(self):
         if self.annotation_type.get() == "YOLO":
-            self.yolo_labels_label.grid(row=5, column=0, sticky=tk.W, padx=5, pady=8)
-            self.yolo_labels_entry.grid(row=5, column=1, columnspan=2, sticky=tk.EW, padx=5, pady=8)
-            self.yolo_labels_button.grid(row=5, column=3, padx=5, pady=8)
+            self.yolo_labels_label.grid(row=6, column=0, sticky=tk.W, padx=5, pady=8)
+            self.yolo_labels_entry.grid(row=6, column=1, columnspan=2, sticky=tk.EW, padx=5, pady=8)
+            self.yolo_labels_button.grid(row=6, column=3, padx=5, pady=8)
         else:
             self.yolo_labels_label.grid_remove()
             self.yolo_labels_entry.grid_remove()
@@ -1138,8 +1146,6 @@ class ImageReviewApp:
         self.recent_comments = None  # For the list of recent comments
 
         # create a temp file for comments to be saved across sessions
-        self.temp_comments_file = os.path.join(tempfile.gettempdir(), "image_review_comments.json")
-        print(f"Temporary comments file: {self.temp_comments_file}")
         self.last_image_dir = None  # Track the last loaded image directory
         self.last_image_files_hash = None
 
@@ -1177,7 +1183,7 @@ class ImageReviewApp:
 
         # Create the persistent comments pane at the bottom
         self.persistent_comments_pane = ttk.Frame(self.main_vertical_paned)
-        self.main_vertical_paned.add(self.persistent_comments_pane, minsize=80, height=65)
+        self.main_vertical_paned.add(self.persistent_comments_pane, minsize=80, height=80)
 
         # Comments pane visibility flag
         self.comments_pane_visible = True
@@ -1231,7 +1237,18 @@ class ImageReviewApp:
             self.root.attributes('-zoomed', True)
         else:  # Linux
             self.root.attributes('-zoomed', True)
-        
+
+    def browse_comments_dir(self):
+        directory = filedialog.askdirectory()
+        if directory:
+            try:
+                self.side_panel.comments_dir_entry.delete(0, tk.END)
+                self.side_panel.comments_dir_entry.insert(0, directory)
+            except Exception:
+                pass
+            # Update the temp comments file path
+            self.temp_comments_file = os.path.join(directory, "image_review_comments.json")
+                
     def toggle_side_panel(self):
         """Toggle the visibility of the right side panel"""
         if self.side_panel_visible:
@@ -1581,7 +1598,7 @@ class ImageReviewApp:
         ttk.Button(zoom_frame, text="+", width=3, command=self.zoom_in).pack(side=tk.LEFT)
 
         # Add reset view button
-        ttk.Button(nav_right, text="Reset View", command=self.reset_view).pack(side=tk.RIGHT, padx=5)
+        ttk.Button(nav_right, text="Reset View (R)", command=self.reset_view).pack(side=tk.RIGHT, padx=5)
 
     def on_mouse_move(self, event):
         """Update status bar with cursor position"""
@@ -2482,6 +2499,17 @@ class ImageReviewApp:
                 self.annotation_dir = settings.get("annotation_dir", "")
                 self.image_dir = settings.get("image_dir", "")
                 self.output_excel = settings.get("output_excel", "")
+                comments_dir = settings.get("comments_dir", "")                
+                if not comments_dir:
+                    comments_dir = os.getcwd()  # Use current directory as default                    
+                if comments_dir:
+                    self.temp_comments_file = os.path.join(comments_dir, "image_review_comments.json")
+                    print(f"Temporary comments file: {self.temp_comments_file}")        
+                    try:
+                        self.side_panel.comments_dir_entry.delete(0, tk.END)
+                        self.side_panel.comments_dir_entry.insert(0, comments_dir)
+                    except Exception:
+                        pass
                 
                 # Load the last image index
                 self.last_image_index = settings.get("last_image_index", 0)
@@ -2506,12 +2534,14 @@ class ImageReviewApp:
             self.annotation_dir = self.side_panel.ann_dir_entry.get().strip()
             self.image_dir = self.side_panel.img_dir_entry.get().strip()
             self.output_excel = self.side_panel.output_entry.get().strip()
+            comments_dir = self.side_panel.comments_dir_entry.get().strip() if hasattr(self.side_panel, 'comments_dir_entry') else ""
         except Exception:
             pass
         settings = {
             "annotation_dir": self.annotation_dir,
             "image_dir": self.image_dir,
             "output_excel": self.output_excel,
+            "comments_dir": comments_dir,
             "last_image_index": self.current_index,  # Save the current image index
         }
         settings_file = get_settings_file()

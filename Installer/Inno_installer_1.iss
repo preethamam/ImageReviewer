@@ -2,7 +2,7 @@
 ; SEE THE DOCUMENTATION FOR DETAILS ON CREATING INNO SETUP SCRIPT FILES!
 
 #define MyAppName "Image Reviewer"
-#define MyAppVersion "1.1.0"
+#define MyAppVersion "1.2.0"
 #define MyAppPublisher "Preetham Manjunatha"
 #define MyAppURL "https://preethamam.github.io/"
 #define MyAppExeName "Image Reviewer.exe"
@@ -36,7 +36,7 @@ DisableProgramGroupPage=yes
 ; Uncomment the following line to run in non administrative install mode (install for current user only).
 ;PrivilegesRequired=lowest
 OutputDir=C:\Users\Preetham\Downloads
-OutputBaseFilename=Image Reviewer v1.1.0
+OutputBaseFilename=Image Reviewer v1.2.0
 SetupIconFile=D:\OneDrive\Education Materials\Applications\Toolboxes\Python\My Functions\Image Reviewer\app.ico
 SolidCompression=yes
 WizardStyle=modern
