@@ -3,8 +3,11 @@ import gc
 import glob
 import hashlib
 import json
+import logging
+import logging.handlers
 import os
 import pickle
+import sys
 import tempfile
 import time
 import threading
@@ -22,6 +25,34 @@ from matplotlib.backends.backend_tkagg import (FigureCanvasTkAgg,
                                                NavigationToolbar2Tk)
 from PIL import Image, ImageTk
 from tqdm import tqdm
+
+#########################
+# Logging helpers
+#########################
+
+class StreamToLogger:
+    """Redirect a stream (stdout/stderr) into the Python logging system."""
+    def __init__(self, logger, level):
+        self.logger = logger
+        self.level = level
+        self._buf = ''
+
+    def write(self, msg):
+        self._buf += msg
+        while '\n' in self._buf:
+            line, self._buf = self._buf.split('\n', 1)
+            line = line.rstrip()
+            if line:
+                self.logger.log(self.level, line)
+
+    def flush(self):
+        if self._buf.rstrip():
+            self.logger.log(self.level, self._buf.rstrip())
+        self._buf = ''
+
+    def fileno(self):
+        raise OSError("StreamToLogger has no real file descriptor")
+
 
 #########################
 # Helper Functions
@@ -81,18 +112,18 @@ class BinaryAnnotationManager:
         # Try to load from cache
         if os.path.exists(metadata_cache_file):
             try:
-                print(f"Loading cached metadata from {metadata_cache_file}")
+                logging.info(f"Loading cached metadata from {metadata_cache_file}")
                 with open(metadata_cache_file, 'rb') as f:
                     cache_data = pickle.load(f)
                     self.metadata_by_filename = cache_data['metadata']
                     self.mask_file_mapping = cache_data['mapping']
-                print(f"Loaded metadata for {len(self.metadata_by_filename)} images")
+                logging.info(f"Loaded metadata for {len(self.metadata_by_filename)} images")
                 return
             except Exception as e:
-                print(f"Error loading metadata cache: {e}, will regenerate")
+                logging.error(f"Error loading metadata cache: {e}, will regenerate")
         
         # Build metadata
-        print("Building metadata index for binary annotations...")
+        logging.info("Building metadata index for binary annotations...")
         start_time = time.time()
         
         # Get all mask files
@@ -100,8 +131,8 @@ class BinaryAnnotationManager:
         
         # Process each mask file to extract metadata only
         results = Parallel(n_jobs=-1, prefer="threads")(
-            delayed(self._extract_metadata)(mask_file) 
-            for mask_file in tqdm(mask_files, desc="Extracting metadata")
+            delayed(self._extract_metadata)(mask_file)
+            for mask_file in tqdm(mask_files, desc="Extracting metadata", disable=True)
         )
         
         # Combine results
@@ -118,9 +149,9 @@ class BinaryAnnotationManager:
                     'metadata': self.metadata_by_filename,
                     'mapping': self.mask_file_mapping
                 }, f)
-            print(f"Metadata cache saved. Processing time: {time.time() - start_time:.2f} seconds")
+            logging.info(f"Metadata cache saved. Processing time: {time.time() - start_time:.2f} seconds")
         except Exception as e:
-            print(f"Error saving metadata cache: {e}")
+            logging.error(f"Error saving metadata cache: {e}")
     
     def _extract_metadata(self, mask_file):
         """Extract only bounding box metadata from a mask file"""
@@ -168,7 +199,7 @@ class BinaryAnnotationManager:
             return original_image_name, metadata_list, mask_file
             
         except Exception as e:
-            print(f"Error processing {mask_file}: {e}")
+            logging.error(f"Error processing {mask_file}: {e}")
             return None
     
     def _generate_dataset_hash(self):
@@ -240,7 +271,7 @@ class BinaryAnnotationManager:
             return annotations
             
         except Exception as e:
-            print(f"Error loading annotations for {image_filename}: {e}")
+            logging.error(f"Error loading annotations for {image_filename}: {e}")
             return []
     
     def get_metadata_only(self, image_filename):
@@ -471,7 +502,7 @@ class FilteredViewTab:
         limit_entry = ttk.Spinbox(limit_frame, from_=10, to=500, width=5,
                                   textvariable=self.limit_var, increment=10)
         limit_entry.pack(side=tk.LEFT, padx=5)
-        self.limit_var.trace("w", self.update_thumbnail_limit)
+        self.limit_var.trace_add("write", self.update_thumbnail_limit)
 
         # Status/count indicator
         self.status_var = tk.StringVar(value="Ready")
@@ -699,7 +730,7 @@ class FilteredViewTab:
                                 tk_img = ImageTk.PhotoImage(square_img)
                                 self.thumbnail_cache[cache_key] = tk_img
                             except Exception as e:
-                                print(f"Error creating thumbnail for {img_file}, annotation {ann_index}: {e}")
+                                logging.error(f"Error creating thumbnail for {img_file}, annotation {ann_index}: {e}")
                                 continue
                         else:
                             continue  # Skip annotations without bbox
@@ -727,7 +758,7 @@ class FilteredViewTab:
                         row += 1
         except Exception as e:
             # Log error but continue with other images
-            print(f"Error processing {img_file}: {str(e)}")
+            logging.error(f"Error processing {img_file}: {str(e)}")
 
         # Move to next image
         loaded_count += 1
@@ -1284,7 +1315,7 @@ class ImageReviewApp:
 
         ttk.Label(search_frame, text="Filter:", font=("Helvetica", 9)).pack(side=tk.LEFT)
         self.filter_var = tk.StringVar()
-        self.filter_var.trace("w", self.filter_annotations)
+        self.filter_var.trace_add("write", self.filter_annotations)
         filter_entry = ttk.Entry(search_frame, textvariable=self.filter_var, width=20)
         filter_entry.pack(side=tk.LEFT, padx=5, fill=tk.X, expand=True)
 
@@ -2036,17 +2067,17 @@ class ImageReviewApp:
                 if self.image_dir and self.image_dir == saved_image_dir:
                     if self.image_files and self._get_image_files_hash() == saved_hash:
                         self.comments = saved_comments
-                        print(f"Loaded {len(self.comments)} comments from temp file")
+                        logging.info(f"Loaded {len(self.comments)} comments from temp file")
                     else:
                         self.comments = {}
-                        print("Dataset mismatch; comments not loaded")
+                        logging.info("Dataset mismatch; comments not loaded")
                 else:
                     # Defer loading until load_data sets image_dir and image_files
                     self.last_image_dir = saved_image_dir
                     self.last_image_files_hash = saved_hash
                     self.comments = saved_comments if saved_image_dir else {}
         except Exception as e:
-            print(f"Failed to load comments from temp file: {e}")
+            logging.error(f"Failed to load comments from temp file: {e}")
             self.comments = {}
     
     def load_new_image(self, save_current=True):
@@ -2119,9 +2150,9 @@ class ImageReviewApp:
                 self.persistent_comment_text.delete("1.0", tk.END)  # Ensure cleared
                 if comment_to_load:
                     self.persistent_comment_text.insert(tk.END, comment_to_load)
-                    print(f"Loaded comment '{comment_to_load}' for {current_file}")
+                    logging.debug(f"Loaded comment '{comment_to_load}' for {current_file}")
                 else:
-                    print(f"No saved comment for {current_file}")
+                    logging.debug(f"No saved comment for {current_file}")
 
             if self.side_panel.comment_text:
                 self.side_panel.comment_text.config(state=tk.NORMAL)
@@ -2138,7 +2169,7 @@ class ImageReviewApp:
 
         except Exception as e:
             messagebox.showerror("Error", f"Error loading image {current_file}: {str(e)}")
-            print(f"Error loading image: {str(e)}")
+            logging.error(f"Error loading image: {str(e)}")
         finally:
             self._is_navigating = False
 
@@ -2149,18 +2180,19 @@ class ImageReviewApp:
         comment = self.persistent_comment_text.get("1.0", tk.END).strip()
         if comment and (force_save or not self._is_navigating):
             self.comments[current_file] = comment
-            print(f"Saved comment '{comment}' for {current_file} (explicit save)")
-            try:
-                with open(self.temp_comments_file, 'w') as f:
-                    json.dump({
-                        "image_dir": self.image_dir,
-                        "image_files_hash": self._get_image_files_hash(),
-                        "comments": self.comments
-                    }, f)
-            except Exception as e:
-                print(f"Failed to save comments to temp file: {e}")
+            logging.debug(f"Saved comment '{comment}' for {current_file} (explicit save)")
         elif not comment:
             self.comments.pop(current_file, None)
+            logging.debug(f"Cleared comment for {current_file}")
+        try:
+            with open(self.temp_comments_file, 'w') as f:
+                json.dump({
+                    "image_dir": self.image_dir,
+                    "image_files_hash": self._get_image_files_hash(),
+                    "comments": self.comments
+                }, f)
+        except Exception as e:
+            logging.error(f"Failed to save comments to temp file: {e}")
 
         if self.side_panel.comment_text:
             self.side_panel.comment_text.config(state=tk.NORMAL)
@@ -2175,19 +2207,15 @@ class ImageReviewApp:
         if not self.image_files or self.current_index >= len(self.image_files) - 1:
             return
         if self.persistent_comment_text:
-            current_comment = self.persistent_comment_text.get("1.0", tk.END).strip()
-            if current_comment:
-                self.save_comment_for_previous(self.image_files[self.current_index])
+            self.save_comment_for_previous(self.image_files[self.current_index])
         self.current_index += 1
-        self.load_new_image(save_current=False)  # Disable save_current since we saved already
+        self.load_new_image(save_current=False)
 
     def prev_image(self):
         if not self.image_files or self.current_index <= 0:
             return
         if self.persistent_comment_text:
-            current_comment = self.persistent_comment_text.get("1.0", tk.END).strip()
-            if current_comment:
-                self.save_comment_for_previous(self.image_files[self.current_index])
+            self.save_comment_for_previous(self.image_files[self.current_index])
         self.current_index -= 1
         self.load_new_image(save_current=False)
 
@@ -2197,16 +2225,19 @@ class ImageReviewApp:
         comment = self.persistent_comment_text.get("1.0", tk.END).strip()
         if comment:
             self.comments[previous_file] = comment
-            print(f"Saved comment '{comment}' for {previous_file}")
-            try:
-                with open(self.temp_comments_file, 'w') as f:
-                    json.dump({
-                        "image_dir": self.image_dir,
-                        "image_files_hash": self._get_image_files_hash(),
-                        "comments": self.comments
-                    }, f)
-            except Exception as e:
-                print(f"Failed to save comments to temp file: {e}")
+            logging.debug(f"Saved comment '{comment}' for {previous_file}")
+        else:
+            self.comments.pop(previous_file, None)
+            logging.debug(f"Cleared comment for {previous_file}")
+        try:
+            with open(self.temp_comments_file, 'w') as f:
+                json.dump({
+                    "image_dir": self.image_dir,
+                    "image_files_hash": self._get_image_files_hash(),
+                    "comments": self.comments
+                }, f)
+        except Exception as e:
+            logging.error(f"Failed to save comments to temp file: {e}")
 
     def handle_tab_key(self, event):
         """Handle tab key in text widgets to allow focus navigation"""
@@ -2504,7 +2535,7 @@ class ImageReviewApp:
                     comments_dir = os.getcwd()  # Use current directory as default                    
                 if comments_dir:
                     self.temp_comments_file = os.path.join(comments_dir, "image_review_comments.json")
-                    print(f"Temporary comments file: {self.temp_comments_file}")        
+                    logging.info(f"Temporary comments file: {self.temp_comments_file}")
                     try:
                         self.side_panel.comments_dir_entry.delete(0, tk.END)
                         self.side_panel.comments_dir_entry.insert(0, comments_dir)
@@ -2643,7 +2674,7 @@ class ImageReviewApp:
             # Make sure the index is valid for the current dataset
             if 0 <= self.last_image_index < len(self.image_files):
                 self.current_index = self.last_image_index
-                print(f"Continuing from image {self.current_index + 1} of {len(self.image_files)}")
+                logging.info(f"Continuing from image {self.current_index + 1} of {len(self.image_files)}")
             else:
                 self.current_index = 0
         else:
@@ -2659,12 +2690,12 @@ class ImageReviewApp:
                     current_hash = self._get_image_files_hash()
                     if self.image_dir == saved_image_dir and current_hash == saved_hash:
                         self.comments = saved_comments
-                        print(f"Loaded {len(self.comments)} comments from temp file")
+                        logging.info(f"Loaded {len(self.comments)} comments from temp file")
                     else:
                         self.comments = {}
-                        print("Dataset mismatch; comments not loaded")
+                        logging.info("Dataset mismatch; comments not loaded")
             except Exception as e:
-                print(f"Failed to load comments from temp file: {e}")
+                logging.error(f"Failed to load comments from temp file: {e}")
                 self.comments = {}
         else:
             self.comments = {}
@@ -2689,6 +2720,24 @@ class ImageReviewApp:
 #########################
 
 if __name__ == "__main__":
+    # Store log alongside the metadata cache in the user's home directory
+    _log_dir = os.path.join(os.path.expanduser("~"), ".image_review_tool_cache")
+    os.makedirs(_log_dir, exist_ok=True)
+    _log_path = os.path.join(_log_dir, 'output.log')
+
+    # Rotating handler: 5 MB cap, backupCount=0 truncates and restarts (never exceeds 5 MB)
+    _handler = logging.handlers.RotatingFileHandler(
+        _log_path, maxBytes=5 * 1024 * 1024, backupCount=0, encoding='utf-8'
+    )
+    _handler.setFormatter(logging.Formatter('%(asctime)s %(levelname)s %(message)s'))
+    logging.basicConfig(level=logging.INFO, handlers=[_handler])
+
+    # When running as a frozen PyInstaller bundle (no console window), redirect
+    # stdout/stderr so joblib worker output also lands in the log file.
+    if getattr(sys, 'frozen', False):
+        sys.stdout = StreamToLogger(logging.getLogger('stdout'), logging.INFO)
+        sys.stderr = StreamToLogger(logging.getLogger('stderr'), logging.WARNING)
+
     root = tk.Tk()
     screen_width = root.winfo_screenwidth()
     screen_height = root.winfo_screenheight()

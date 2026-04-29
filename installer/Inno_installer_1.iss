@@ -2,7 +2,7 @@
 ; SEE THE DOCUMENTATION FOR DETAILS ON CREATING INNO SETUP SCRIPT FILES!
 
 #define MyAppName "Image Reviewer"
-#define MyAppVersion "1.2.0"
+#define MyAppVersion "1.3.0"
 #define MyAppPublisher "Preetham Manjunatha"
 #define MyAppURL "https://preethamam.github.io/"
 #define MyAppExeName "Image Reviewer.exe"
@@ -37,7 +37,7 @@ DisableProgramGroupPage=yes
 ; Uncomment the following line to run in non administrative install mode (install for current user only).
 ;PrivilegesRequired=lowest
 OutputDir=C:\Users\Preetham\Downloads
-OutputBaseFilename=Image Reviewer v1.2.0
+OutputBaseFilename=Image Reviewer
 SetupIconFile=D:\OneDrive\Education Materials\Applications\Toolboxes\Python\My Functions\Image Reviewer\app.ico
 SolidCompression=yes
 WizardStyle=modern
@@ -58,7 +58,6 @@ Name: "french"; MessagesFile: "compiler:Languages\French.isl"
 Name: "german"; MessagesFile: "compiler:Languages\German.isl"
 Name: "hebrew"; MessagesFile: "compiler:Languages\Hebrew.isl"
 Name: "hungarian"; MessagesFile: "compiler:Languages\Hungarian.isl"
-Name: "icelandic"; MessagesFile: "compiler:Languages\Icelandic.isl"
 Name: "italian"; MessagesFile: "compiler:Languages\Italian.isl"
 Name: "japanese"; MessagesFile: "compiler:Languages\Japanese.isl"
 Name: "korean"; MessagesFile: "compiler:Languages\Korean.isl"
