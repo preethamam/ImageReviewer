@@ -2006,15 +2006,15 @@ class ImageReviewApp:
         ttk.Button(shortcuts_frame, text="Pixel(s) off (Ctrl+Q)", 
                 command=lambda: self.add_predefined_comment("1-1.5 pixels off"), 
                 width=20).pack(side=tk.LEFT, padx=2)
-        ttk.Button(shortcuts_frame, text="Full (Ctrl+F)", 
+        ttk.Button(shortcuts_frame, text="Full Revision (Ctrl+F)", 
                 command=lambda: self.add_predefined_comment("Full revision"), 
-                width=12).pack(side=tk.LEFT, padx=2)
-        ttk.Button(shortcuts_frame, text="Minor (Ctrl+N)", 
+                width=20).pack(side=tk.LEFT, padx=2)
+        ttk.Button(shortcuts_frame, text="Minor Revision (Ctrl+N)", 
                 command=lambda: self.add_predefined_comment("Minor edits"), 
-                width=12).pack(side=tk.LEFT, padx=2)
-        ttk.Button(shortcuts_frame, text="Major (Ctrl+M)", 
+                width=20).pack(side=tk.LEFT, padx=2)
+        ttk.Button(shortcuts_frame, text="Major Revision (Ctrl+M)", 
                 command=lambda: self.add_predefined_comment("Major edits"), 
-                width=12).pack(side=tk.LEFT, padx=2)
+                width=20).pack(side=tk.LEFT, padx=2)
 
         # Bind text change to update character count
         self.persistent_comment_text.bind("<<Modified>>", self.update_char_count)
